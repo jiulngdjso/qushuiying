@@ -191,7 +191,7 @@
   "30": {
     "inputs": {
       "video": "__INPUT_VIDEO__",
-      "force_rate": 30,
+      "force_rate": 0,
       "custom_width": 0,
       "custom_height": 0,
       "frame_load_cap": 0,
