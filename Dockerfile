@@ -1,26 +1,32 @@
 FROM runpod/worker-comfyui:5.5.1-base
 
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg git && \
+    rm -rf /var/lib/apt/lists/*
+
+# ComfyUI 基座一般在 /comfyui
+ENV COMFYUI_DIR=/comfyui
+ENV COMFYUI_PORT=8188
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /comfyui
 
-# 1) 复制：依赖锁 + 工作流(API格式) + handler
-COPY requirements.added.lock.txt /requirements.added.lock.txt
-COPY workflow_api.json /workflow_api.json
+# 1) 安装你“跑通工作流”的最小依赖
+COPY locks/requirements.lock.txt /tmp/requirements.lock.txt
+RUN /opt/venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.lock.txt
+
+# 2) 安装自定义节点（按 lock 固定版本）
+COPY locks/custom_nodes.lock.txt /tmp/custom_nodes.lock.txt
+COPY tools/install_custom_nodes.py /tmp/install_custom_nodes.py
+RUN /opt/venv/bin/python /tmp/install_custom_nodes.py \
+      --lock /tmp/custom_nodes.lock.txt \
+      --dst /comfyui/custom_nodes
+
+# 3) 拷贝工作流 + handler
+COPY workflows/workflow_api.json /comfyui/workflows/workflow_api.json
 COPY handler.py /handler.py
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
-# 2) 安装新增 pip 依赖（用 base 镜像自带的 venv）
-RUN /opt/venv/bin/pip install -U pip \
- && /opt/venv/bin/pip install -r /requirements.added.lock.txt
-
-# 3) 安装工作流需要的 custom_nodes（先用“拉最新”跑通；后面你再 pin commit）
-RUN set -eux; \
-  cd /comfyui/custom_nodes; \
-  git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Manager || true; \
-  git clone --depth 1 https://github.com/Kijai/ComfyUI-WanVideoWrapper || true; \
-  git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite || true; \
-  git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Impact-Pack || true; \
-  git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Impact-Subpack || true; \
-  git clone --depth 1 https://github.com/chflame163/ComfyUI_LayerStyle || true;
-
-ENV PYTHONUNBUFFERED=1
-CMD ["/opt/venv/bin/python", "-u", "/handler.py"]
-
+CMD ["/start.sh"]
