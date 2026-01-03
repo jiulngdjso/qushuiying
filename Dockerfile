@@ -18,6 +18,8 @@ RUN /opt/venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.lock
 # 2) 安装自定义节点（按 commit 锁版本）
 COPY locks/custom_nodes.lock.txt /tmp/custom_nodes.lock.txt
 COPY tools/install_custom_nodes.py /tmp/install_custom_nodes.py
+RUN rm -rf /comfyui/custom_nodes/ComfyUI-Manager \
+ && rm -rf /comfyui/user/default/ComfyUI-Manager
 RUN /opt/venv/bin/python /tmp/install_custom_nodes.py \
       --lock /tmp/custom_nodes.lock.txt \
       --dst /comfyui/custom_nodes
