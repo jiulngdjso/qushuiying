@@ -1,1 +1,12 @@
+ComfyUI-Dynamic-Lora-Scheduler  b5a796bb8c6995129283c3e216aae7fc5e889f2a
+ComfyUI-Manager  72aa95cacfb1dc0e8eaf3c019c17886710c90eea
+ComfyUI-WanVideoWrapper  (no .git)
+__pycache__  (no .git)
+comfyui-impact-pack  (no .git)
+comfyui-impact-subpack  (no .git)
+comfyui-kjnodes  (no .git)
+comfyui-videohelpersuite  (no .git)
+comfyui_essentials  (no .git)
+comfyui_layerstyle  (no .git)
+rgthree-comfy  (no .git)
 
