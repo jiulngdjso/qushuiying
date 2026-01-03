@@ -1,12 +1,9 @@
-ComfyUI-Dynamic-Lora-Scheduler  b5a796bb8c6995129283c3e216aae7fc5e889f2a
-ComfyUI-Manager  72aa95cacfb1dc0e8eaf3c019c17886710c90eea
-ComfyUI-WanVideoWrapper  (no .git)
-__pycache__  (no .git)
-comfyui-impact-pack  (no .git)
-comfyui-impact-subpack  (no .git)
-comfyui-kjnodes  (no .git)
-comfyui-videohelpersuite  (no .git)
-comfyui_essentials  (no .git)
-comfyui_layerstyle  (no .git)
-rgthree-comfy  (no .git)
-
+https://github.com/LeonQ8/ComfyUI-Dynamic-Lora-Scheduler.git|b5a796bb8c6995129283c3e216aae7fc5e889f2a
+https://github.com/ltdrdata/ComfyUI-Impact-Pack.git|6a517ebe06fea2b74fc41b3bd089c0d7173eeced
+https://github.com/ltdrdata/ComfyUI-Impact-Subpack.git|50c7b71a6a224734cc9b21963c6d1926816a97f1
+https://github.com/kijai/ComfyUI-KJNodes.git|7b1327192e4729085788a3020a9cbb095e0c7811
+https://github.com/ltdrdata/ComfyUI-Manager|72aa95cacfb1dc0e8eaf3c019c17886710c90eea
+https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git|3234937ff5f3ca19068aaba5042771514de2429d
+https://github.com/kijai/ComfyUI-WanVideoWrapper.git|bf1d77fe155c0bdbefd3d48bf5b320dce8c55849
+https://github.com/chflame163/ComfyUI_LayerStyle.git|5840264d0d7cb47185acfed28c02848e94c6a894
+https://github.com/cubiq/ComfyUI_essentials.git|9d9f4bedfc9f0321c19faf71855e228c93bd0dc9
