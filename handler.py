@@ -16,7 +16,7 @@ import runpod
 # Config
 # -----------------------------
 COMFY_HOST = os.environ.get("COMFY_HOST", "127.0.0.1")
-COMFY_PORT = int(os.environ.get("COMFY_PORT", "8188"))
+COMFY_PORT = int(os.environ.get("COMFYUI_PORT") or os.environ.get("COMFY_PORT") or "8188")
 COMFY_BASE = f"http://{COMFY_HOST}:{COMFY_PORT}"
 
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
@@ -24,11 +24,10 @@ S3_BUCKET = os.environ.get("S3_BUCKET")
 S3_ACCESS_KEY_ID = os.environ.get("S3_ACCESS_KEY_ID")
 S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY")
 
-# Default preprocessing policy
-DEFAULT_FPS_CAP = 24
-DEFAULT_MAX_SECONDS = 15
+# 你的策略（按你最新要求）
+FPS_CAP = 30          # 只要输入 fps > 30 才降到 30
+MAX_SECONDS = 15      # 只要时长 > 15 秒才裁剪到前 15 秒
 
-# Where workflow template lives inside the image
 WORKFLOW_PATH = "/comfyui/workflows/workflow_api.json"
 COMFY_OUTPUT_DIR = "/comfyui/output"
 
@@ -62,40 +61,36 @@ def sh(cmd: list, check: bool = True) -> str:
 
 
 def probe_video(path: str) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Returns (fps, duration_seconds) from ffprobe.
-    fps may be None if cannot be determined.
-    duration may be None if cannot be determined.
-    """
-    # ffprobe JSON
+    """Returns (fps, duration_seconds) using ffprobe."""
     out = sh([
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=avg_frame_rate,r_frame_rate,duration",
+        "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+        "-show_entries", "format=duration",
         "-of", "json",
         path
     ])
     try:
         data = json.loads(out)
+
+        fps = None
         stream = (data.get("streams") or [{}])[0]
         afr = stream.get("avg_frame_rate") or "0/0"
         rfr = stream.get("r_frame_rate") or "0/0"
-
-        fps = None
         for frac in (afr, rfr):
             try:
                 f = Fraction(frac)
-                if f.numerator != 0 and f.denominator != 0:
+                if f.numerator and f.denominator:
                     fps = float(f)
                     break
             except Exception:
                 pass
 
         dur = None
-        d = stream.get("duration")
-        if d is not None:
+        fmt = data.get("format") or {}
+        if fmt.get("duration") is not None:
             try:
-                dur = float(d)
+                dur = float(fmt["duration"])
             except Exception:
                 dur = None
 
@@ -104,77 +99,109 @@ def probe_video(path: str) -> Tuple[Optional[float], Optional[float]]:
         return None, None
 
 
-def preprocess_video(
-    src: str,
-    dst: str,
-    fps_cap: int,
-    max_seconds: int
-) -> Dict[str, Any]:
+def ffmpeg_trim_copy(src: str, dst: str, max_seconds: int) -> Dict[str, Any]:
     """
-    - If fps > fps_cap, downsample to fps_cap.
-    - If duration > max_seconds, trim to first max_seconds seconds.
-    - If no change needed, reuse src (no transcode).
-    Returns a dict with info and sets 'path' to the chosen file.
+    Trim to first max_seconds with stream copy (no re-encode).
+    Keeps quality.
     """
-    fps_in, dur_in = probe_video(src)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", src,
+        "-t", str(int(max_seconds)),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        "-avoid_negative_ts", "make_zero",
+        dst
+    ]
+    sh(cmd, check=True)
+    fps_out, dur_out = probe_video(dst)
+    return {"path": dst, "fps_out": fps_out, "dur_out": dur_out, "transcoded": False, "remuxed": True}
 
-    # Decide whether we must transcode
-    need_fps = (fps_in is not None and fps_cap > 0 and fps_in > (fps_cap + 0.01))
-    # Even if duration cannot be probed, we still enforce -t for safety (protect compute)
-    need_trim = (max_seconds > 0) and (dur_in is None or (dur_in > (max_seconds + 0.001)))
 
-    # If nothing to do, just use src
-    if not need_fps and not need_trim:
-        return {
-            "path": src,
-            "fps_in": fps_in,
-            "dur_in": dur_in,
-            "fps_cap": fps_cap,
-            "max_seconds": max_seconds,
-            "downsampled": False,
-            "trimmed": False,
-            "transcoded": False,
-        }
+def ffmpeg_downsample_encode(src: str, dst: str, fps_cap: int, max_seconds: Optional[int]) -> Dict[str, Any]:
+    """
+    Downsample fps (requires re-encode). Optionally trim.
+    Try audio copy first; fallback to AAC if needed.
+    """
+    base = ["ffmpeg", "-y", "-i", src]
+    if max_seconds and max_seconds > 0:
+        base += ["-t", str(int(max_seconds))]
 
-    vf = []
-    if need_fps:
-        vf.append(f"fps={int(fps_cap)}")
+    base += ["-vf", f"fps={int(fps_cap)}"]
 
-    cmd = ["ffmpeg", "-y", "-i", src]
-    # Trim first (protect compute); applies to audio+video
-    if max_seconds > 0:
-        cmd += ["-t", str(int(max_seconds))]
-    if vf:
-        cmd += ["-vf", ",".join(vf)]
-
-    # Keep audio (your workflow later combines audio)
-    cmd += [
+    # Try audio copy first
+    cmd1 = base + [
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "18",
-        "-c:a", "aac",
-        "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
         "-movflags", "+faststart",
         dst
     ]
 
-    # Run ffmpeg
-    _ = sh(cmd, check=True)
+    try:
+        sh(cmd1, check=True)
+    except Exception:
+        cmd2 = base + [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            dst
+        ]
+        sh(cmd2, check=True)
 
     fps_out, dur_out = probe_video(dst)
+    return {"path": dst, "fps_out": fps_out, "dur_out": dur_out, "transcoded": True, "remuxed": False}
 
-    return {
-        "path": dst,
+
+def preprocess_video(src: str, dst: str, fps_cap: int, max_seconds: int) -> Dict[str, Any]:
+    """
+    Rules:
+    - if fps_in > FPS_CAP -> downsample to FPS_CAP (re-encode)
+    - if dur_in > MAX_SECONDS -> trim to MAX_SECONDS
+    - if only trim needed -> stream copy (no re-encode)
+    - if nothing needed -> use src directly
+    """
+    fps_in, dur_in = probe_video(src)
+
+    need_fps = (fps_in is not None and fps_in > (fps_cap + 0.01))
+    need_trim = (dur_in is not None and dur_in > (max_seconds + 0.001))
+
+    info = {
         "fps_in": fps_in,
         "dur_in": dur_in,
-        "fps_out": fps_out,
-        "dur_out": dur_out,
         "fps_cap": fps_cap,
         "max_seconds": max_seconds,
-        "downsampled": bool(need_fps),
-        "trimmed": bool(need_trim),
-        "transcoded": True,
+        "downsampled": False,
+        "trimmed": False,
+        "transcoded": False,
+        "remuxed": False,
+        "path": src
     }
+
+    if not need_fps and not need_trim:
+        return info
+
+    # only trim -> no re-encode
+    if need_trim and not need_fps:
+        out = ffmpeg_trim_copy(src, dst, max_seconds=max_seconds)
+        info.update(out)
+        info["trimmed"] = True
+        return info
+
+    # need fps downsample -> re-encode (and trim if needed)
+    out = ffmpeg_downsample_encode(src, dst, fps_cap=fps_cap, max_seconds=(max_seconds if need_trim else None))
+    info.update(out)
+    info["downsampled"] = True
+    info["transcoded"] = True
+    if need_trim:
+        info["trimmed"] = True
+    return info
 
 
 def comfy_post_prompt(prompt: dict) -> str:
@@ -195,7 +222,6 @@ def wait_until_done(prompt_id: str, timeout_sec: int = 3600, poll: float = 1.0) 
         hist = comfy_get_history(prompt_id)
         if prompt_id in hist:
             status = hist[prompt_id].get("status", {})
-            # ComfyUI usually marks "completed"
             if status.get("completed", False) or status.get("status_str") == "success":
                 return hist[prompt_id]
             if status.get("status_str") == "error":
@@ -206,9 +232,6 @@ def wait_until_done(prompt_id: str, timeout_sec: int = 3600, poll: float = 1.0) 
 
 
 def find_latest_output(prefix: str) -> str:
-    """
-    Find latest mp4 in /comfyui/output whose filename starts with prefix.
-    """
     best = None
     best_mtime = -1
     if not os.path.isdir(COMFY_OUTPUT_DIR):
@@ -245,28 +268,13 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     if not input_key:
         return {"error": "missing input.input_key"}
 
-    # output_key optional
     job_id = inp.get("job_id") or uuid.uuid4().hex[:12]
     output_key = inp.get("output_key") or f"outputs/{job_id}.mp4"
 
+    # 只允许传 timeout_sec；fps/时长按固定策略执行（避免误传 fps_limit 造成抽帧）
     params = inp.get("params") or {}
+    timeout_sec = int(params.get("timeout_sec", 3600))
 
-    # New policy:
-    # - cap fps at min(original fps, cap) where cap = params.fps_limit if provided else 24
-    # - max_seconds default 15
-    fps_cap = params.get("fps_limit")
-    try:
-        fps_cap = int(fps_cap) if fps_cap is not None else DEFAULT_FPS_CAP
-    except Exception:
-        fps_cap = DEFAULT_FPS_CAP
-
-    max_seconds = params.get("max_seconds")
-    try:
-        max_seconds = int(max_seconds) if max_seconds is not None else DEFAULT_MAX_SECONDS
-    except Exception:
-        max_seconds = DEFAULT_MAX_SECONDS
-
-    # Working dir
     workdir = f"/tmp/jobs/{job_id}"
     os.makedirs(workdir, exist_ok=True)
 
@@ -280,45 +288,63 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         aws_secret_access_key=S3_SECRET_ACCESS_KEY,
     )
 
-    # 1) Download input from R2
-    s3.download_file(S3_BUCKET, input_key, local_in)
-
-    # 2) Preprocess: cap fps + trim to max_seconds
-    pre_info = preprocess_video(local_in, local_pre, fps_cap=fps_cap, max_seconds=max_seconds)
-    input_path_for_comfy = pre_info["path"]
-
-    # 3) Load workflow template and replace placeholders
-    with open(WORKFLOW_PATH, "r", encoding="utf-8") as f:
-        wf = json.load(f)
-
-    prefix = f"job_{job_id}"
-    wf = deep_replace(wf, {
-        "__INPUT_VIDEO__": input_path_for_comfy,
-        "__OUTPUT_PREFIX__": prefix,
-    })
-
-    # 4) Submit to ComfyUI and wait
-    prompt_id = comfy_post_prompt(wf)
-    result = wait_until_done(prompt_id, timeout_sec=int(params.get("timeout_sec", 3600)))
-
-    # 5) Find output and upload to R2
-    out_local = find_latest_output(prefix)
-    s3.upload_file(out_local, S3_BUCKET, output_key)
-
-    # Optional cleanup
+    t0 = time.time()
     try:
-        shutil.rmtree(workdir, ignore_errors=True)
-    except Exception:
-        pass
+        # 1) Download from R2
+        s3.download_file(S3_BUCKET, input_key, local_in)
+        t_dl = time.time()
 
-    return {
-        "job_id": job_id,
-        "input_key": input_key,
-        "output_key": output_key,
-        "prompt_id": prompt_id,
-        "preprocess": pre_info,
-        "comfy_result_status": result.get("status", {}),
-    }
+        # 2) Preprocess with fixed rules
+        pre_info = preprocess_video(local_in, local_pre, fps_cap=FPS_CAP, max_seconds=MAX_SECONDS)
+        input_path_for_comfy = pre_info["path"]
+        t_pre = time.time()
+
+        # 3) Load workflow and replace placeholders
+        with open(WORKFLOW_PATH, "r", encoding="utf-8") as f:
+            wf = json.load(f)
+
+        prefix = f"job_{job_id}"
+        wf = deep_replace(wf, {
+            "__INPUT_VIDEO__": input_path_for_comfy,
+            "__OUTPUT_PREFIX__": prefix,
+        })
+        t_wf = time.time()
+
+        # 4) Run ComfyUI
+        prompt_id = comfy_post_prompt(wf)
+        result = wait_until_done(prompt_id, timeout_sec=timeout_sec)
+        t_comfy = time.time()
+
+        # 5) Upload output
+        out_local = find_latest_output(prefix)
+        s3.upload_file(out_local, S3_BUCKET, output_key)
+        t_up = time.time()
+
+        # 可选：删输出，避免 /comfyui/output 越跑越大（你也可以注释掉）
+        try:
+            os.remove(out_local)
+        except Exception:
+            pass
+
+        return {
+            "job_id": job_id,
+            "input_key": input_key,
+            "output_key": output_key,
+            "prompt_id": prompt_id,
+            "preprocess": pre_info,
+            "timing_sec": {
+                "download": round(t_dl - t0, 3),
+                "preprocess": round(t_pre - t_dl, 3),
+                "workflow_prepare": round(t_wf - t_pre, 3),
+                "comfy_run": round(t_comfy - t_wf, 3),
+                "upload": round(t_up - t_comfy, 3),
+                "total": round(t_up - t0, 3),
+            },
+            "comfy_status": result.get("status", {}),
+        }
+
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 runpod.serverless.start({"handler": handler})
